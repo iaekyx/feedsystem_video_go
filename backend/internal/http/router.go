@@ -1,7 +1,6 @@
 package http
 
 import (
-	"context"
 	"feedsystem_video_go/internal/account"
 	"feedsystem_video_go/internal/feed"
 	"feedsystem_video_go/internal/message"
@@ -19,7 +18,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func SetRouter(db *gorm.DB, cache *rediscache.Client, rmq *rabbitmq.RabbitMQ) *gin.Engine {
+func SetRouter(db *gorm.DB, cache *rediscache.Client, rmq *rabbitmq.RabbitMQ, sseHub *worker.SSEHub) *gin.Engine {
 	r := gin.Default()
 	if err := r.SetTrustedProxies(nil); err != nil {
 		log.Printf("SetTrustedProxies failed: %v", err)
@@ -95,7 +94,7 @@ func SetRouter(db *gorm.DB, cache *rediscache.Client, rmq *rabbitmq.RabbitMQ) *g
 	likeGroup := r.Group("/like")
 	protectedLikeGroup := likeGroup.Group("")
 	protectedLikeGroup.Use(jwt.JWTAuth(accountRepository, cache))
-	{
+	{ //路由又增加了限流
 		protectedLikeGroup.POST("/like", likeLimiter, likeHandler.Like)
 		protectedLikeGroup.POST("/unlike", likeLimiter, likeHandler.Unlike)
 		protectedLikeGroup.POST("/isLiked", likeHandler.IsLiked)
@@ -166,11 +165,13 @@ func SetRouter(db *gorm.DB, cache *rediscache.Client, rmq *rabbitmq.RabbitMQ) *g
 			FollowerCount: followerCount, VloggerCount: vloggerCount,
 		})
 	})
-	// feed
+	// feed 组装业务对象：依赖注入
 	feedRepository := feed.NewFeedRepository(db)
 	feedService := feed.NewFeedService(feedRepository, likeRepository, cache)
 	feedHandler := feed.NewFeedHandler(feedService)
+	// 注册路由：把 URL 对应到处理函数
 	feedGroup := r.Group("/feed")
+	// 使用认证
 	feedGroup.Use(jwt.SoftJWTAuth(accountRepository, cache))
 	{
 		feedGroup.POST("/listLatest", feedHandler.ListLatest)
@@ -194,62 +195,10 @@ func SetRouter(db *gorm.DB, cache *rediscache.Client, rmq *rabbitmq.RabbitMQ) *g
 		protectedMessageGroup.POST("/send", messageHandler.Send)
 		protectedMessageGroup.POST("/list", messageHandler.List)
 	}
-	//worker
-	timelineMQ, err := rabbitmq.NewTimelineMQ(rmq)
-	if err != nil {
-		log.Printf("timelineMQ init failed (mq disabled): %v", err)
-		timelineMQ = nil
-	}
-	worker.StartOutboxPoller(db, timelineMQ)
-	worker.StartConsumer(timelineMQ, "video.timeline.update.queue", cache, rmq)
 
-	// SSE notification
-	if rmq != nil {
-		if notifCh, err := rmq.NewChannel(); err == nil {
-			if err := rabbitmq.DeclareTopic(notifCh, "like.events", "notification.like", "like.like"); err != nil {
-				log.Printf("notification like topic init failed: %v", err)
-			}
-			if err := rabbitmq.DeclareTopic(notifCh, "comment.events", "notification.comment", "comment.publish"); err != nil {
-				log.Printf("notification comment topic init failed: %v", err)
-			}
-			if err := rabbitmq.DeclareTopic(notifCh, "social.events", "notification.social", "social.follow"); err != nil {
-				log.Printf("notification social topic init failed: %v", err)
-			}
-			notifCh.Close()
-		}
-	}
-	sseHub := worker.NewSSEHub(db)
+	// SSE connections belong to this API instance; lifecycle is managed in main.
 	notifGroup := r.Group("/notification")
 	notifGroup.Use(sseHub.SSERequireAuth())
 	sseHub.RegisterRoutes(r, notifGroup)
-
-	go func() {
-		if rmq != nil {
-			hub := sseHub
-			ctx := context.Background()
-			// 每个 notification worker 独立 Channel + 自动重连
-			for _, q := range []string{"notification.like", "notification.comment", "notification.social"} {
-				go func(queue string) {
-					for {
-						ch, err := rmq.NewChannel()
-						if err != nil {
-							log.Printf("notification-%s: 创建 Channel 失败: %v, 5秒后重试", queue, err)
-							time.Sleep(5 * time.Second)
-							continue
-						}
-						w := worker.NewNotificationWorker(ch, db, queue, hub)
-						if err := w.Run(ctx); err != nil {
-							log.Printf("notification-%s: %v, 5秒后重连...", queue, err)
-						}
-						ch.Close()
-						time.Sleep(5 * time.Second)
-					}
-				}(q)
-			}
-		} else {
-			log.Printf("Notification SSE disabled (MQ not available)")
-		}
-	}()
-
 	return r
 }

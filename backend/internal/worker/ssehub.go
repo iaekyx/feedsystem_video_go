@@ -16,14 +16,19 @@ import (
 )
 
 type SSEHub struct {
-	mu      sync.RWMutex
-	clients map[uint][]chan *Notification
-	db      *gorm.DB
+	mu        sync.RWMutex
+	clients   map[uint][]chan *Notification
+	db        *gorm.DB
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 func NewSSEHub(db *gorm.DB) *SSEHub {
-	return &SSEHub{clients: make(map[uint][]chan *Notification), db: db}
+	return &SSEHub{clients: make(map[uint][]chan *Notification), db: db, done: make(chan struct{})}
 }
+
+// Close ends all SSE streams without waiting for the HTTP shutdown deadline.
+func (h *SSEHub) Close() { h.closeOnce.Do(func() { close(h.done) }) }
 
 func (h *SSEHub) Push(userID uint, n *Notification) {
 	h.mu.RLock()
@@ -108,6 +113,7 @@ func (h *SSEHub) SSEHandler(c *gin.Context) {
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.WriteHeader(http.StatusOK)
 
 	ch := h.Subscribe(userID)
@@ -115,9 +121,14 @@ func (h *SSEHub) SSEHandler(c *gin.Context) {
 
 	ctx := c.Request.Context()
 	flusher, _ := c.Writer.(http.Flusher)
+	if flusher != nil {
+		flusher.Flush()
+	}
 
 	for {
 		select {
+		case <-h.done:
+			return
 		case <-ctx.Done():
 			return
 		case n, ok := <-ch:
@@ -209,5 +220,3 @@ func (h *SSEHub) RegisterRoutes(r *gin.Engine, group *gin.RouterGroup) {
 	group.POST("/markRead", h.MarkReadHandler)
 	group.POST("/unreadCount", h.UnreadCountHandler)
 }
-
-var _ NotificationHub = (*SSEHub)(nil)

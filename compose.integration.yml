@@ -1,0 +1,48 @@
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: integration-only
+      MYSQL_DATABASE: integration
+    tmpfs:
+      - /var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -pintegration-only --silent"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+  rabbitmq:
+    image: rabbitmq:3-management
+    environment:
+      RABBITMQ_DEFAULT_USER: integration
+      RABBITMQ_DEFAULT_PASS: integration-only
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 40
+  tests:
+    image: golang:1.24.5
+    working_dir: /src
+    volumes:
+      - ./backend:/src
+      - go_mod:/go/pkg/mod
+      - go_build:/root/.cache/go-build
+    environment:
+      TEST_MYSQL_DSN: root:integration-only@tcp(mysql:3306)/integration?charset=utf8mb4&parseTime=True&loc=UTC
+      TEST_AMQP_URL: amqp://integration:integration-only@rabbitmq:5672/
+      GOPROXY: https://goproxy.cn,direct
+      GOSUMDB: sum.golang.google.cn
+    command: ["sh", "-c", "go test -race -count=1 ./... && go vet ./..."]
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+volumes:
+  go_mod:
+    external: true
+    name: feedsystem_go_mod
+  go_build:
+    external: true
+    name: feedsystem_go_build

@@ -68,13 +68,16 @@ func (w *LikeWorker) handleDelivery(ctx context.Context, d amqp.Delivery) {
 		}
 		if err := w.process(ctx, d.Body); err != nil {
 			if i >= maxRetries {
-				log.Printf("like worker: 重试 %d 次后仍失败, 丢弃: %v", maxRetries, err)
-				_ = d.Ack(false)
+				log.Printf("like worker: 重试 %d 次后仍失败, 转入死信队列: %v", maxRetries, err)
+				_ = d.Nack(false, false)
 				return
 			}
 			wait := time.Duration(1<<uint(i)) * time.Second
 			log.Printf("like worker: 处理失败, %v 后重试 (%d/%d): %v", wait, i+1, maxRetries, err)
-			time.Sleep(wait)
+			if !pause(ctx, wait) {
+				_ = d.Nack(false, true)
+				return
+			}
 			continue
 		}
 		_ = d.Ack(false)
@@ -103,51 +106,8 @@ func (w *LikeWorker) process(ctx context.Context, body []byte) error {
 }
 
 func (w *LikeWorker) applyLike(ctx context.Context, userID, videoID uint) error {
-	ok, err := w.videos.IsExist(ctx, videoID)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return nil
-	}
-
-	created, err := w.likes.LikeIgnoreDuplicate(ctx, &video.Like{
-		VideoID:   videoID,
-		AccountID: userID,
-		CreatedAt: time.Now(),
-	})
-	if err != nil {
-		return err
-	}
-	if !created {
-		return nil
-	}
-
-	if err := w.videos.ChangeLikesCount(ctx, videoID, 1); err != nil {
-		return err
-	}
-	return w.videos.ChangePopularity(ctx, videoID, 1)
+	return w.likes.ApplyLike(ctx, userID, videoID, true)
 }
-
 func (w *LikeWorker) applyUnlike(ctx context.Context, userID, videoID uint) error {
-	ok, err := w.videos.IsExist(ctx, videoID)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return nil
-	}
-
-	deleted, err := w.likes.DeleteByVideoAndAccount(ctx, videoID, userID)
-	if err != nil {
-		return err
-	}
-	if !deleted {
-		return nil
-	}
-
-	if err := w.videos.ChangeLikesCount(ctx, videoID, -1); err != nil {
-		return err
-	}
-	return w.videos.ChangePopularity(ctx, videoID, -1)
+	return w.likes.ApplyLike(ctx, userID, videoID, false)
 }

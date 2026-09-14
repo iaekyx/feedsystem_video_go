@@ -170,6 +170,30 @@ GitHub Actions 配置位于 `.github/workflows/ci.yml`，在 Pull Request 以及
 
 ## 运维与可观测性
 
+### API / Worker 职责与停机
+
+- API：HTTP、鉴权与同步业务；管理 SSE 连接，通过每实例独立的 RabbitMQ 临时队列接收通知广播。`router.go` 只组装路由，不启动后台消费者。
+- Worker：点赞、评论、关注、热度消费者，以及 Outbox 轮询、全局时间线更新、通知生成与持久化。
+- 点赞和取消点赞消费在一个 MySQL 事务里修改关系记录、点赞数和热度；对视频行加锁，重复的同方向操作不会再次增加/扣减计数。这不是跨点赞/取消点赞乱序事件的完整去重协议。
+- Outbox 使用 `FOR UPDATE SKIP LOCKED` 在事务内领取单条记录，等待 Publisher Confirm 并检查不可路由返回后删除记录；发布失败回滚，后续重试。事务期间会持有行锁，单次确认等待上限为 3 秒。确认成功后事务失败仍可能重复投递，时间线 `ZADD` 可重复执行。
+- 通知按源消息内容指纹去重落库，然后广播。所有在线 API 实例各接收一份，只推给自己持有的 SSE 连接。实时推送是尽力而为；断线期间或队列溢出的消息通过通知列表接口恢复，不能依赖 SSE 保存历史。API 对一分钟内重复通知 ID 做本地过滤。
+- `SIGINT`/`SIGTERM` 会取消后台任务并等待退出，再关闭依赖连接。Worker 停止时取消在途操作，未确认 MQ 消息可重新投递。API 同时结束 SSE 长连接，并给普通 HTTP 请求最多 5 秒完成时间。
+- Consumer 重试耗尽后 Nack 到配置的死信交换机，需要人工检查/重放。原有点赞与 Redis 热度的双发布仍不是原子操作；本次拆分不解决跨 MySQL/Redis 的全部一致性问题。
+- API 负责自动迁移表结构；Compose 首次启动等待 API 健康后再启动 Worker。通知新增可空唯一字段 `event_key`，已有通知记录可保留。正式多实例部署应把迁移作为单独步骤。
+
+API、Worker 默认各限制为 1 CPU、512 MiB，可通过 `API_CPUS`、`API_MEMORY`、`WORKER_CPUS`、`WORKER_MEMORY` 覆盖。Worker 可使用 `docker compose up -d --scale worker=2` 扩容。API 扩容还需调整固定宿主端口映射并配置负载均衡。
+
+隔离集成测试（启动独立 MySQL / RabbitMQ，不连接业务数据库）：
+
+```bash
+docker volume create feedsystem_go_mod
+docker volume create feedsystem_go_build
+docker compose -p feedsystem-integration -f compose.integration.yml up --abort-on-container-exit --exit-code-from tests
+docker compose -p feedsystem-integration -f compose.integration.yml down -v
+```
+
+测试覆盖事务失败回滚、重复点赞/取消、Outbox 并发领取与失败保留、通知重试去重、跨 API 队列广播、不可路由发布确认，以及任务退出；执行全量 `go test -race` 和 `go vet`。临时数据库使用 tmpfs，Go 缓存卷可复用。
+
 - `GET /healthz` 返回后端健康状态。
 - 本地配置默认开启 pprof：API `localhost:6060`，Worker `localhost:6061`。
 - 上传文件写入 `backend/.run/uploads`；Docker 环境挂载到 `backend_uploads` volume。

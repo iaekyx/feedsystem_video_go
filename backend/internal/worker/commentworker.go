@@ -69,13 +69,16 @@ func (w *CommentWorker) handleDelivery(ctx context.Context, d amqp.Delivery) {
 		}
 		if err := w.process(ctx, d.Body); err != nil {
 			if i >= maxRetries {
-				log.Printf("comment worker: 重试 %d 次后仍失败, 丢弃: %v", maxRetries, err)
-				_ = d.Ack(false)
+				log.Printf("comment worker: 重试 %d 次后仍失败, 转入死信队列: %v", maxRetries, err)
+				_ = d.Nack(false, false)
 				return
 			}
 			wait := time.Duration(1<<uint(i)) * time.Second
 			log.Printf("comment worker: 处理失败, %v 后重试 (%d/%d): %v", wait, i+1, maxRetries, err)
-			time.Sleep(wait)
+			if !pause(ctx, wait) {
+				_ = d.Nack(false, true)
+				return
+			}
 			continue
 		}
 		_ = d.Ack(false)

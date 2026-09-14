@@ -54,6 +54,9 @@ services:
       retries: 20
 
   backend:
+    cpus: "${API_CPUS:-1.0}"
+    mem_limit: ${API_MEMORY:-512m}
+    stop_grace_period: 15s
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -86,6 +89,9 @@ services:
       retries: 3
 
   worker:
+    cpus: "${WORKER_CPUS:-1.0}"
+    mem_limit: ${WORKER_MEMORY:-512m}
+    stop_grace_period: 20s
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -102,6 +108,8 @@ services:
     volumes:
       - ./backend/configs/config.docker.yaml:/app/configs/config.yaml:ro
     depends_on:
+      backend:
+        condition: service_healthy
       mysql:
         condition: service_healthy
       redis:

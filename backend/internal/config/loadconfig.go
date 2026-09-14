@@ -8,7 +8,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
-
+//反引号里的 yaml:"host" 是字段标签，告诉 YAML 解析器：“文件中的 host 对应这个结构体的 Host 字段。cfg.Database.Host可以访问对应值
 type Config struct {
 	Server              ServerConfig        `yaml:"server"`
 	Database            DatabaseConfig      `yaml:"database"`

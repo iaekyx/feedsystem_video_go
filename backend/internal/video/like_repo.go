@@ -3,9 +3,11 @@ package video
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type LikeRepository struct {
@@ -14,6 +16,37 @@ type LikeRepository struct {
 
 func NewLikeRepository(db *gorm.DB) *LikeRepository {
 	return &LikeRepository{db: db}
+}
+
+// ApplyLike atomically changes the relationship and both counters. Locking the
+// video also serializes concurrent like/unlike operations for that video.
+func (r *LikeRepository) ApplyLike(ctx context.Context, userID, videoID uint, liked bool) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var v Video
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&v, videoID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		repo := NewLikeRepository(tx)
+		var changed bool
+		var err error
+		delta := int64(1)
+		if liked {
+			changed, err = repo.LikeIgnoreDuplicate(ctx, &Like{VideoID: videoID, AccountID: userID, CreatedAt: time.Now()})
+		} else {
+			delta = -1
+			changed, err = repo.DeleteByVideoAndAccount(ctx, videoID, userID)
+		}
+		if err != nil || !changed {
+			return err
+		}
+		return tx.Model(&Video{}).Where("id = ?", videoID).Updates(map[string]interface{}{
+			"likes_count": gorm.Expr("GREATEST(likes_count + ?, 0)", delta),
+			"popularity":  gorm.Expr("GREATEST(popularity + ?, 0)", delta),
+		}).Error
+	})
 }
 
 func (r *LikeRepository) Like(ctx context.Context, like *Like) error {

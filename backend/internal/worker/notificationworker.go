@@ -2,9 +2,12 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"feedsystem_video_go/internal/middleware/rabbitmq"
+	"fmt"
+	"gorm.io/gorm/clause"
 	"log"
 	"time"
 
@@ -13,6 +16,7 @@ import (
 )
 
 type Notification struct {
+	EventKey    *string   `gorm:"size:64;uniqueIndex" json:"-"`
 	ID          uint      `gorm:"primaryKey" json:"id"`
 	RecipientID uint      `gorm:"index;not null" json:"recipient_id"`
 	SenderID    uint      `gorm:"not null" json:"sender_id"`
@@ -31,7 +35,7 @@ type NotificationWorker struct {
 }
 
 type NotificationHub interface {
-	Push(userID uint, n *Notification)
+	Publish(ctx context.Context, n *Notification) error
 }
 
 func NewNotificationWorker(ch *amqp.Channel, db *gorm.DB, queue string, hub NotificationHub) *NotificationWorker {
@@ -44,9 +48,6 @@ func (w *NotificationWorker) Run(ctx context.Context) error {
 	}
 	if w.queue == "" {
 		return errors.New("queue is required")
-	}
-	if err := w.db.WithContext(ctx).AutoMigrate(&Notification{}); err != nil {
-		return err
 	}
 	deliveries, err := w.ch.Consume(w.queue, "", false, false, false, false, nil)
 	if err != nil {
@@ -76,13 +77,16 @@ func (w *NotificationWorker) handleDelivery(ctx context.Context, d amqp.Delivery
 		}
 		if err := w.process(ctx, d); err != nil {
 			if i >= maxRetries {
-				log.Printf("notification worker: 重试 %d 次后仍失败, 丢弃: %v", maxRetries, err)
-				_ = d.Ack(false)
+				log.Printf("notification worker: 重试 %d 次后仍失败, 转入死信队列: %v", maxRetries, err)
+				_ = d.Nack(false, false)
 				return
 			}
 			wait := time.Duration(1<<uint(i)) * time.Second
 			log.Printf("notification worker: 处理失败, %v 后重试 (%d/%d): %v", wait, i+1, maxRetries, err)
-			time.Sleep(wait)
+			if !pause(ctx, wait) {
+				_ = d.Nack(false, true)
+				return
+			}
 			continue
 		}
 		_ = d.Ack(false)
@@ -154,11 +158,18 @@ func (w *NotificationWorker) process(ctx context.Context, d amqp.Delivery) error
 	if notif == nil {
 		return nil
 	}
-	if err := w.db.WithContext(ctx).Create(notif).Error; err != nil {
+	key := fmt.Sprintf("%x", sha256.Sum256(append([]byte(routingKey+"\x00"), body...)))
+	notif.EventKey = &key
+	if err := w.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(notif).Error; err != nil {
+		return err
+	}
+	// Read the persisted ID on redelivery; never generate another notification.
+	notif.ID = 0
+	if err := w.db.WithContext(ctx).Where("event_key = ?", key).First(notif).Error; err != nil {
 		return err
 	}
 	if w.hub != nil {
-		w.hub.Push(notif.RecipientID, notif)
+		return w.hub.Publish(ctx, notif)
 	}
 	return nil
 }
