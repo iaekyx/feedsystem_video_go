@@ -38,7 +38,8 @@ const likesCount = reactive<ListState & { limit: number; next_likes_count_before
   next_id_before: undefined,
 })
 
-const following = reactive<ListState & { limit: number; next_time: number }>({
+const following = reactive<ListState & { limit: number; next_time: number; next_cursor: string }>({
+  next_cursor: '',
   loading: false,
   error: '',
   items: [],
@@ -111,9 +112,9 @@ async function loadFollowing(reset: boolean) {
   following.loading = true
   following.error = ''
   try {
-    const latest_time = reset ? 0 : following.next_time
-    const res = await feedApi.listByFollowing({ limit: following.limit, latest_time })
+    const res = await feedApi.listByFollowing({ limit: following.limit, cursor: reset ? '' : following.next_cursor })
     following.has_more = res.has_more
+    following.next_cursor = res.next_cursor
     following.next_time = res.next_time
     following.items = reset ? res.video_list : following.items.concat(res.video_list)
   } catch (e) {

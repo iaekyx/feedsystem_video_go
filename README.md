@@ -165,6 +165,7 @@ GitHub Actions 配置位于 `.github/workflows/ci.yml`，在 Pull Request 以及
 | `REDIS_DB` | `0` | Redis DB |
 | `RABBITMQ_HOST` / `RABBITMQ_PORT` | 配置文件值 | RabbitMQ 地址 |
 | `RABBITMQ_USER` / `RABBITMQ_PASS` | `admin` / `password123` | RabbitMQ 账号 |
+| `FEED_CELEBRITY_THRESHOLD` | `100000` | 粉丝数达到阈值使用拉模型；API 和 Worker 必须一致，须为正整数 |
 
 详见 `.env.example`。
 
@@ -173,7 +174,7 @@ GitHub Actions 配置位于 `.github/workflows/ci.yml`，在 Pull Request 以及
 ### API / Worker 职责与停机
 
 - API：HTTP、鉴权与同步业务；管理 SSE 连接，通过每实例独立的 RabbitMQ 临时队列接收通知广播。`router.go` 只组装路由，不启动后台消费者。
-- Worker：点赞、评论、关注、热度消费者，以及 Outbox 轮询、全局时间线更新、通知生成与持久化。
+- Worker：点赞、评论、关注、热度消费者，以及 Outbox 轮询、全局时间线更新、关注流扩散、通知生成与持久化。
 - 点赞和取消点赞消费在一个 MySQL 事务里修改关系记录、点赞数和热度；对视频行加锁，重复的同方向操作不会再次增加/扣减计数。这不是跨点赞/取消点赞乱序事件的完整去重协议。
 - Outbox 使用 `FOR UPDATE SKIP LOCKED` 在事务内领取单条记录，等待 Publisher Confirm 并检查不可路由返回后删除记录；发布失败回滚，后续重试。事务期间会持有行锁，单次确认等待上限为 3 秒。确认成功后事务失败仍可能重复投递，时间线 `ZADD` 可重复执行。
 - 通知按源消息内容指纹去重落库，然后广播。所有在线 API 实例各接收一份，只推给自己持有的 SSE 连接。实时推送是尽力而为；断线期间或队列溢出的消息通过通知列表接口恢复，不能依赖 SSE 保存历史。API 对一分钟内重复通知 ID 做本地过滤。
@@ -183,7 +184,7 @@ GitHub Actions 配置位于 `.github/workflows/ci.yml`，在 Pull Request 以及
 
 API、Worker 默认各限制为 1 CPU、512 MiB，可通过 `API_CPUS`、`API_MEMORY`、`WORKER_CPUS`、`WORKER_MEMORY` 覆盖。Worker 可使用 `docker compose up -d --scale worker=2` 扩容。API 扩容还需调整固定宿主端口映射并配置负载均衡。
 
-隔离集成测试（启动独立 MySQL / RabbitMQ，不连接业务数据库）：
+隔离集成测试（启动独立 MySQL / Redis / RabbitMQ，不连接业务数据库）：
 
 ```bash
 docker volume create feedsystem_go_mod
@@ -193,6 +194,30 @@ docker compose -p feedsystem-integration -f compose.integration.yml down -v
 ```
 
 测试覆盖事务失败回滚、重复点赞/取消、Outbox 并发领取与失败保留、通知重试去重、跨 API 队列广播、不可路由发布确认，以及任务退出；执行全量 `go test -race` 和 `go vet`。临时数据库使用 tmpfs，Go 缓存卷可复用。
+
+### 关注 Feed：推拉结合
+
+实现位于 `backend/internal/followfeed`，由 `FollowingFanoutWorker` 更新缓存索引，API 调用 `Read` 后复用 `buildFeedVideos` 批量补充当前用户的 `is_liked`。不再缓存包含个人点赞状态的整页响应。
+
+- Outbox 发布前声明时间线和关注流两条持久队列。一条已确认的 `video.timeline.publish` 事件分别路由到 `video.timeline.update.queue` 和 `video.following.fanout.queue`，不是两次独立发送。上线前遗留视频通过读时重建覆盖，无须重放旧 Outbox。
+- 普通作者：更新 `feed:user_videos:<author>`，按粉丝 ID 每批 256 人分页，通过 Redis pipeline 将视频索引写入 `feed:inbox:<viewer>`。每个 inbox 的更新原子，但整批不跨 inbox 事务；部分失败可以安全重试。大 V：只更新作者索引，不逐粉丝写入。分类依据数据库当前粉丝数，默认阈值 100000，可用环境变量配置；本版没有持久化模式或双阈值滞回。
+- 每次 Redis 写入用 Lua 原子完成 ZADD、保留最新 1000 条和设置 24 小时 TTL。ZSET 的 score 全为 0，member 为定长 `微秒时间戳:视频ID`，使用字典序范围查询，避免时间相同漏项和浮点打包精度损失。实际 key 还包含默认 `v1:` 前缀。
+- 读时将普通作者 inbox 与关注的大 V 作品流做最大堆 k-way merge，按 `(create_time DESC, id DESC)` 排序并去重。读取 `limit+1` 条判断 `has_more`；拉取来源超过 32 个时整页退回 SQL，限制读放大。
+- 缓存候选项按来源批量查库校验作者关系和删除状态，同时取得详情，避免旧 inbox 或过期实体缓存泄露取关/已删除内容。因此本版缓存命中仍会查库，不是纯 Redis 读链路。MySQL 增加 `(author_id, create_time DESC, id DESC)` 联合索引，由现有 AutoMigrate 创建。
+- Redis 出错、来源缺失、历史页超出缓存范围或过滤后不足时，使用相同复合游标查询该来源的数据库数据。未登录用户不返回关注内容。
+- 新关注、作者类别变化导致普通作者集合变化时，来源签名触发重建；合并写入而非整体覆盖，避免重建覆盖并发推送。旧作者残留项在读取时过滤。每个来源的就绪标记最长 60 秒后失效，由下一次读取重新查库修复，可补偿延迟事件和模式往返切换；只收到一次推送不会将不完整索引标记为就绪。
+- 消费成功后 Ack，失败 Nack/requeue 并由任务管理器退避重试；无效消息拒绝进入死信。重复投递不会重复插入相同索引。扩散中断从第一批重试，本版尚未持久化逐批检查点，临近大 V 阈值的作者存在重复工作成本。
+- 这是最终一致性关注流，不是冻结快照：异步消息迟到、关注关系改变期间，既有分页会话不能保证看到所有新进入的数据，刷新第一页或后续重建恢复。计数分类目前直接聚合关注表，高规模下可再引入可靠计数投影和活跃粉丝策略。
+
+新分页协议（前端两个关注流入口均已接入）：
+
+```json
+{"limit":10,"cursor":""}
+```
+
+返回 `video_list`、`has_more`、`next_cursor` 和兼容字段 `next_time`。下一页原样传回不透明的 `next_cursor`，不要自行解析或使用视频秒级时间重新构造。仍接受旧的秒级 `latest_time`，但旧客户端没有同时间 ID 防漏保证；有 `cursor` 时优先使用，非法游标返回 400。
+
+新增隔离测试覆盖同时间复合游标、多路去重、推/拉分流、重复投递、截断后历史回源、新关注回填、取关/删除过滤、类别切换、Redis 故障/驱逐，以及 Outbox 到两条时间线的真实 MQ 消费链路。
 
 - `GET /healthz` 返回后端健康状态。
 - 本地配置默认开启 pprof：API `localhost:6060`，Worker `localhost:6061`。

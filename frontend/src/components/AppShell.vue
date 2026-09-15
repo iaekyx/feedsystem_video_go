@@ -57,7 +57,7 @@ async function goSettings() {
       <RouterLink class="dy-logo" to="/">ShortVideo</RouterLink>
 
       <nav class="dy-nav">
-        <RouterLink class="dy-nav-link" to="/">推荐</RouterLink>
+        <RouterLink class="dy-nav-link" to="/">最新</RouterLink>
         <RouterLink class="dy-nav-link" to="/hot">热榜</RouterLink>
         <RouterLink class="dy-nav-link" to="/video">发布</RouterLink>
         <RouterLink class="dy-nav-link" to="/account">账号</RouterLink>
@@ -94,7 +94,7 @@ async function goSettings() {
       </header>
 
       <nav class="dy-mobile-nav">
-        <RouterLink class="dy-mobile-link" to="/">推荐</RouterLink>
+        <RouterLink class="dy-mobile-link" to="/">最新</RouterLink>
         <RouterLink class="dy-mobile-link" to="/hot">热榜</RouterLink>
         <RouterLink class="dy-mobile-link" to="/video">发布</RouterLink>
         <RouterLink v-if="auth.isLoggedIn" class="dy-mobile-link" to="/messages">私信</RouterLink>

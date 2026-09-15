@@ -1,4 +1,11 @@
 services:
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
   mysql:
     image: mysql:8.0
     environment:
@@ -31,10 +38,13 @@ services:
     environment:
       TEST_MYSQL_DSN: root:integration-only@tcp(mysql:3306)/integration?charset=utf8mb4&parseTime=True&loc=UTC
       TEST_AMQP_URL: amqp://integration:integration-only@rabbitmq:5672/
+      TEST_REDIS_ADDR: redis:6379
       GOPROXY: https://goproxy.cn,direct
       GOSUMDB: sum.golang.google.cn
-    command: ["sh", "-c", "go test -race -count=1 ./... && go vet ./..."]
+    command: ["sh", "-c", "go test -race -p 1 -count=1 ./... && go vet ./..."]
     depends_on:
+      redis:
+        condition: service_healthy
       mysql:
         condition: service_healthy
       rabbitmq:

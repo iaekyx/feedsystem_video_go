@@ -2,6 +2,7 @@ package feed
 
 import (
 	"feedsystem_video_go/internal/apierror"
+	"feedsystem_video_go/internal/followfeed"
 	"feedsystem_video_go/internal/middleware/jwt"
 	"time"
 
@@ -108,7 +109,15 @@ func (f *FeedHandler) ListByFollowing(c *gin.Context) {
 	if req.LatestTime > 0 {
 		latestTime = time.Unix(req.LatestTime, 0)
 	}
-	feedItems, err := f.service.ListByFollowing(c.Request.Context(), req.Limit, latestTime, viewerAccountID)
+	cursor, err := followfeed.DecodeCursor(req.Cursor)
+	if err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	if req.Cursor == "" {
+		cursor.Time = latestTime
+	}
+	feedItems, err := f.service.ListFollowingCursor(c.Request.Context(), req.Limit, cursor, viewerAccountID)
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return

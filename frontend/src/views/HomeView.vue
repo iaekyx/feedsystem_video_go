@@ -106,7 +106,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   <AppShell full>
     <div class="page">
       <div class="tabs">
-        <button class="tab" :class="{ on: tab === 'recommend' }" type="button" @click="tab = 'recommend'">推荐</button>
+        <button class="tab" :class="{ on: tab === 'recommend' }" type="button" @click="tab = 'recommend'">最新</button>
         <button class="tab" :class="{ on: tab === 'following' }" type="button" @click="tab = 'following'">关注</button>
         <button class="tab" :class="{ on: tab === 'hot' }" type="button" @click="tab = 'hot'">点赞榜</button>
         <div class="tabs-right">

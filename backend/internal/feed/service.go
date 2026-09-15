@@ -3,6 +3,7 @@ package feed
 import (
 	"context"
 	"encoding/json"
+	"feedsystem_video_go/internal/followfeed"
 	rediscache "feedsystem_video_go/internal/middleware/redis"
 	"feedsystem_video_go/internal/video"
 	"fmt"
@@ -23,6 +24,7 @@ type FeedService struct {
 	localcache   *cache.Cache
 	cacheTTL     time.Duration
 	requestGroup singleflight.Group
+	following    *followfeed.Service
 }
 
 type CachedFeedData struct {
@@ -30,7 +32,7 @@ type CachedFeedData struct {
 }
 
 func NewFeedService(repo *FeedRepository, likeRepo *video.LikeRepository, rediscache *rediscache.Client) *FeedService {
-	return &FeedService{repo: repo, likeRepo: likeRepo, rediscache: rediscache, localcache: cache.New(3*time.Second, 5*time.Second), cacheTTL: 24 * time.Hour}
+	return &FeedService{repo: repo, likeRepo: likeRepo, rediscache: rediscache, localcache: cache.New(3*time.Second, 5*time.Second), cacheTTL: 24 * time.Hour, following: followfeed.New(repo.db, rediscache, followfeed.DefaultOptions())}
 }
 
 func (f *FeedService) GetVideoByIDs(ctx context.Context, videoIDs []uint) ([]*video.Video, error) {
@@ -336,90 +338,30 @@ func (f *FeedService) ListLikesCount(ctx context.Context, limit int, cursor *Lik
 
 // 按照关注列表查询视频
 func (f *FeedService) ListByFollowing(ctx context.Context, limit int, latestBefore time.Time, viewerAccountID uint) (ListByFollowingResponse, error) {
-	doListByFollowingFromDB := func() (ListByFollowingResponse, error) {
-		videos, err := f.repo.ListByFollowing(ctx, limit, viewerAccountID, latestBefore)
-		if err != nil {
-			return ListByFollowingResponse{}, err
-		}
-		var nextTime int64
-		if len(videos) > 0 {
-			nextTime = videos[len(videos)-1].CreateTime.Unix()
-		} else {
-			nextTime = 0
-		}
-		hasMore := len(videos) == limit
-		feedVideos, err := f.buildFeedVideos(ctx, videos, viewerAccountID)
-		if err != nil {
-			return ListByFollowingResponse{}, err
-		}
-		resp := ListByFollowingResponse{
-			VideoList: feedVideos,
-			NextTime:  nextTime,
-			HasMore:   hasMore,
-		}
-		return resp, nil
-	}
-	var cacheKey string
-	if viewerAccountID != 0 && f.rediscache != nil {
-		before := int64(0)
-		if !latestBefore.IsZero() {
-			before = latestBefore.Unix()
-		}
-		cacheKey = f.rediscache.Key("feed:listByFollowing:limit=%d:accountID=%d:before=%d", limit, viewerAccountID, before)
-		cacheCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-		defer cancel()
+	// Legacy seconds-based clients remain supported; new clients send cursor.
+	return f.ListFollowingCursor(ctx, limit, followfeed.Cursor{Time: latestBefore}, viewerAccountID)
+}
 
-		b, err := f.rediscache.GetBytes(cacheCtx, cacheKey)
-		if err == nil {
-			var cached ListByFollowingResponse
-			if err := json.Unmarshal(b, &cached); err == nil {
-				return cached, nil
-			}
-		} else if rediscache.IsMiss(err) { // 缓存未命中
-			lockKey := "lock:" + cacheKey
-			// 缓存未命中，尝试加锁
-			token, locked, _ := f.rediscache.Lock(cacheCtx, lockKey, 500*time.Millisecond)
-			if locked {
-				defer func() { _ = f.rediscache.Unlock(context.Background(), lockKey, token) }()
-				if b, err := f.rediscache.GetBytes(cacheCtx, cacheKey); err == nil {
-					var cached ListByFollowingResponse
-					if err := json.Unmarshal(b, &cached); err == nil {
-						return cached, nil
-					}
-				} else { // 缓存未命中，从数据库中查询
-					resp, err := doListByFollowingFromDB()
-					if err != nil {
-						return ListByFollowingResponse{}, err
-					}
-					if b, err := json.Marshal(resp); err == nil {
-						_ = f.rediscache.SetBytes(cacheCtx, cacheKey, b, f.cacheTTL)
-					}
-					return resp, nil
-				}
-			} else {
-				for i := 0; i < 5; i++ {
-					time.Sleep(20 * time.Millisecond)
-					if b, err := f.rediscache.GetBytes(cacheCtx, cacheKey); err == nil {
-						var cached ListByFollowingResponse
-						if err := json.Unmarshal(b, &cached); err == nil {
-							return cached, nil
-						}
-					}
-				}
-			}
-		}
-	}
-
-	resp, err := doListByFollowingFromDB()
+func (f *FeedService) ListFollowingCursor(ctx context.Context, limit int, cursor followfeed.Cursor, viewer uint) (ListByFollowingResponse, error) {
+	rows, err := f.following.Read(ctx, viewer, cursor, limit+1)
 	if err != nil {
 		return ListByFollowingResponse{}, err
 	}
-	if cacheKey != "" {
-		if b, err := json.Marshal(resp); err == nil {
-			cacheCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-			defer cancel()
-			_ = f.rediscache.SetBytes(cacheCtx, cacheKey, b, f.cacheTTL)
-		}
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+	// Read already hydrates and validates candidate rows in batches. Reuse those
+	// fresh details rather than issue a second round of entity-cache/DB reads.
+	items, err := f.buildFeedVideos(ctx, rows, viewer)
+	if err != nil {
+		return ListByFollowingResponse{}, err
+	}
+	resp := ListByFollowingResponse{VideoList: items, HasMore: hasMore}
+	if len(rows) > 0 {
+		last := rows[len(rows)-1]
+		resp.NextTime = last.CreateTime.Unix()
+		resp.NextCursor = followfeed.EncodeCursor(last)
 	}
 	return resp, nil
 }

@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"feedsystem_video_go/internal/config"
+	"feedsystem_video_go/internal/followfeed"
 	"feedsystem_video_go/internal/middleware/rabbitmq"
 	rediscache "feedsystem_video_go/internal/middleware/redis"
 	"feedsystem_video_go/internal/social"
@@ -57,6 +58,8 @@ func StartBusinessTasks(tasks *Tasks, db *gorm.DB, cache *rediscache.Client, url
 		return NewSocialWorker(ch, social.NewSocialRepository(db), "social.events").Run(ctx)
 	})
 	if cache != nil {
+		following := followfeed.New(db, cache, followfeed.DefaultOptions())
+		start("FollowingFanoutWorker", func(ctx context.Context, ch *amqp.Channel) error { return RunFollowingConsumer(ctx, ch, following) })
 		start("PopularityWorker", func(ctx context.Context, ch *amqp.Channel) error {
 			if err := rabbitmq.DeclareTopic(ch, "video.popularity.events", "video.popularity.events", "video.popularity.*"); err != nil {
 				return err

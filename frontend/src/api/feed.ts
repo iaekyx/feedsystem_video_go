@@ -22,7 +22,7 @@ export async function listByPopularity(input: { limit: number; as_of: number; of
   return { ...res, video_list: normalizeFeedVideoList(res.video_list) }
 }
 
-export async function listByFollowing(input: { limit: number; latest_time: number }) {
+export async function listByFollowing(input: { limit: number; latest_time?: number; cursor?: string }) {
   const res = await postJson<ListByFollowingResponse>('/feed/listByFollowing', input, { authRequired: true })
   return { ...res, video_list: normalizeFeedVideoList(res.video_list) }
 }

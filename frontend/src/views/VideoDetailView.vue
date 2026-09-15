@@ -257,7 +257,7 @@ onMounted(async () => {
     <div class="page">
       <div class="top">
         <div class="top-left">
-          <RouterLink class="chip" to="/">← 返回推荐</RouterLink>
+          <RouterLink class="chip" to="/">← 返回最新</RouterLink>
         </div>
         <div class="top-right">
           <button class="chip" type="button" @click="toggleMute">{{ muted ? '静音' : '有声' }}</button>

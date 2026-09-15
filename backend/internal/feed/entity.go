@@ -49,14 +49,16 @@ type ListLikesCountResponse struct {
 }
 
 type ListByFollowingRequest struct {
-	Limit      int   `json:"limit"`
-	LatestTime int64 `json:"latest_time"`
+	Cursor     string `json:"cursor"`
+	Limit      int    `json:"limit"`
+	LatestTime int64  `json:"latest_time"`
 }
 
 type ListByFollowingResponse struct {
-	VideoList []FeedVideoItem `json:"video_list"`
-	NextTime  int64           `json:"next_time"`
-	HasMore   bool            `json:"has_more"`
+	NextCursor string          `json:"next_cursor"`
+	VideoList  []FeedVideoItem `json:"video_list"`
+	NextTime   int64           `json:"next_time"`
+	HasMore    bool            `json:"has_more"`
 }
 
 type ListByPopularityRequest struct {

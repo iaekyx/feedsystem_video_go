@@ -25,6 +25,7 @@ export function useVideoFeed() {
   })
 
   const following = reactive({
+    nextCursor: '',
     items: [] as FeedVideoItem[],
     loading: false, error: '',
     hasMore: false, nextTime: 0,
@@ -82,8 +83,9 @@ export function useVideoFeed() {
     following.loading = true
     following.error = ''
     try {
-      const res = await feedApi.listByFollowing({ limit: 10, latest_time: reset ? 0 : following.nextTime })
+      const res = await feedApi.listByFollowing({ limit: 10, cursor: reset ? '' : following.nextCursor })
       following.hasMore = res.has_more
+      following.nextCursor = res.next_cursor
       following.nextTime = res.next_time
       following.items = reset ? res.video_list : following.items.concat(res.video_list)
     } catch (e) {

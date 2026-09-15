@@ -47,6 +47,10 @@ func RunOutboxPoller(ctx context.Context, db *gorm.DB, ch *amqp.Channel) error {
 	if err := DeclareTimeline(ch); err != nil {
 		return err
 	}
+	// Bind both queues before publishing, even if a consumer is not running yet.
+	if err := DeclareFollowing(ch); err != nil {
+		return err
+	}
 	publisher, err := newConfirmedPublisher(ch)
 	if err != nil {
 		return err
