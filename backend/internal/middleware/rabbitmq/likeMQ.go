@@ -9,7 +9,8 @@ import (
 )
 
 type LikeMQ struct {
-	ch *amqp.Channel
+	ch        *amqp.Channel
+	publisher *ConfirmedPublisher
 }
 
 const (
@@ -41,7 +42,12 @@ func NewLikeMQ(base *RabbitMQ) (*LikeMQ, error) {
 		ch.Close()
 		return nil, err
 	}
-	return &LikeMQ{ch: ch}, nil
+	publisher, err := NewConfirmedPublisher(ch)
+	if err != nil {
+		ch.Close()
+		return nil, err
+	}
+	return &LikeMQ{ch: ch, publisher: publisher}, nil
 }
 
 func (l *LikeMQ) Like(ctx context.Context, userID, videoID uint) error {
@@ -70,5 +76,5 @@ func (l *LikeMQ) publish(ctx context.Context, action, routingKey string, userID,
 		VideoID:    videoID,
 		OccurredAt: time.Now(),
 	}
-	return PublishJSON(ctx, l.ch, likeExchange, routingKey, event)
+	return l.publisher.Publish(ctx, likeExchange, routingKey, true, event)
 }

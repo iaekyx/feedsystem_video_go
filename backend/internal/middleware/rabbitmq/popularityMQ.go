@@ -9,7 +9,8 @@ import (
 )
 
 type PopularityMQ struct {
-	ch *amqp.Channel
+	ch        *amqp.Channel
+	publisher *ConfirmedPublisher
 }
 
 const (
@@ -39,7 +40,12 @@ func NewPopularityMQ(base *RabbitMQ) (*PopularityMQ, error) {
 		ch.Close()
 		return nil, err
 	}
-	return &PopularityMQ{ch: ch}, nil
+	publisher, err := NewConfirmedPublisher(ch)
+	if err != nil {
+		ch.Close()
+		return nil, err
+	}
+	return &PopularityMQ{ch: ch, publisher: publisher}, nil
 }
 
 func (p *PopularityMQ) Update(ctx context.Context, videoID uint, change int64) error {
@@ -59,5 +65,5 @@ func (p *PopularityMQ) Update(ctx context.Context, videoID uint, change int64) e
 		Change:     change,
 		OccurredAt: time.Now().UTC(),
 	}
-	return PublishJSON(ctx, p.ch, popularityExchange, popularityUpdateRK, event)
+	return p.publisher.Publish(ctx, popularityExchange, popularityUpdateRK, true, event)
 }

@@ -9,7 +9,8 @@ import (
 )
 
 type TimelineMQ struct {
-	ch *amqp.Channel
+	ch        *amqp.Channel
+	publisher *ConfirmedPublisher
 }
 
 const (
@@ -38,7 +39,12 @@ func NewTimelineMQ(base *RabbitMQ) (*TimelineMQ, error) {
 		ch.Close()
 		return nil, err
 	}
-	return &TimelineMQ{ch: ch}, nil
+	publisher, err := NewConfirmedPublisher(ch)
+	if err != nil {
+		ch.Close()
+		return nil, err
+	}
+	return &TimelineMQ{ch: ch, publisher: publisher}, nil
 }
 
 func (t *TimelineMQ) PublishVideo(ctx context.Context, videoID uint, createTime time.Time) error {
@@ -58,5 +64,5 @@ func (t *TimelineMQ) PublishVideo(ctx context.Context, videoID uint, createTime 
 		CreateTime: createTime.UnixMilli(),
 		OccurredAt: time.Now(),
 	}
-	return PublishJSON(ctx, t.ch, timelineExchange, timelinePublishRK, timeline)
+	return t.publisher.Publish(ctx, timelineExchange, timelinePublishRK, true, timeline)
 }

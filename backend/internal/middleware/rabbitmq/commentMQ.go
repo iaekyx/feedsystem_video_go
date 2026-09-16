@@ -9,7 +9,8 @@ import (
 )
 
 type CommentMQ struct {
-	ch *amqp.Channel
+	ch        *amqp.Channel
+	publisher *ConfirmedPublisher
 }
 
 const (
@@ -44,7 +45,12 @@ func NewCommentMQ(base *RabbitMQ) (*CommentMQ, error) {
 		ch.Close()
 		return nil, err
 	}
-	return &CommentMQ{ch: ch}, nil
+	publisher, err := NewConfirmedPublisher(ch)
+	if err != nil {
+		ch.Close()
+		return nil, err
+	}
+	return &CommentMQ{ch: ch, publisher: publisher}, nil
 }
 
 func (c *CommentMQ) Publish(ctx context.Context, username string, videoID, authorID uint, content string) error {
@@ -73,5 +79,5 @@ func (c *CommentMQ) publish(ctx context.Context, action, routingKey string, evt 
 	evt.EventID = id
 	evt.Action = action
 	evt.OccurredAt = time.Now().UTC()
-	return PublishJSON(ctx, c.ch, commentExchange, routingKey, evt)
+	return c.publisher.Publish(ctx, commentExchange, routingKey, true, evt)
 }

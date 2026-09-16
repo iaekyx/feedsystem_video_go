@@ -39,7 +39,15 @@ type UpdateLikesCountRequest struct {
 	LikesCount int64 `json:"likes_count"`
 }
 
+type ConsumedEvent struct {
+	EventKey  string    `gorm:"size:64;primaryKey"`
+	CreatedAt time.Time `gorm:"autoCreateTime"`
+}
+
 type OutboxMsg struct {
+	Exchange   string    `gorm:"size:100"`
+	RoutingKey string    `gorm:"size:100"`
+	Payload    []byte    `gorm:"type:longblob"`
 	ID         uint      `gorm:"primaryKey"`
 	VideoID    uint      `gorm:"index"`
 	EventType  string    `gorm:"type:varchar(50)"`

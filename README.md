@@ -175,11 +175,11 @@ GitHub Actions 配置位于 `.github/workflows/ci.yml`，在 Pull Request 以及
 
 - API：HTTP、鉴权与同步业务；管理 SSE 连接，通过每实例独立的 RabbitMQ 临时队列接收通知广播。`router.go` 只组装路由，不启动后台消费者。
 - Worker：点赞、评论、关注、热度消费者，以及 Outbox 轮询、全局时间线更新、关注流扩散、通知生成与持久化。
-- 点赞和取消点赞消费在一个 MySQL 事务里修改关系记录、点赞数和热度；对视频行加锁，重复的同方向操作不会再次增加/扣减计数。这不是跨点赞/取消点赞乱序事件的完整去重协议。
+- 点赞、取消点赞和评论请求先写入持久化 Outbox。消费者在一个 MySQL 事务中记录事件去重、修改业务数据和计数，并仅为真实变化写入热度 Outbox；旧消息重放不会恢复已取消的点赞或已删除的评论。
 - Outbox 使用 `FOR UPDATE SKIP LOCKED` 在事务内领取单条记录，等待 Publisher Confirm 并检查不可路由返回后删除记录；发布失败回滚，后续重试。事务期间会持有行锁，单次确认等待上限为 3 秒。确认成功后事务失败仍可能重复投递，时间线 `ZADD` 可重复执行。
 - 通知按源消息内容指纹去重落库，然后广播。所有在线 API 实例各接收一份，只推给自己持有的 SSE 连接。实时推送是尽力而为；断线期间或队列溢出的消息通过通知列表接口恢复，不能依赖 SSE 保存历史。API 对一分钟内重复通知 ID 做本地过滤。
 - `SIGINT`/`SIGTERM` 会取消后台任务并等待退出，再关闭依赖连接。Worker 停止时取消在途操作，未确认 MQ 消息可重新投递。API 同时结束 SSE 长连接，并给普通 HTTP 请求最多 5 秒完成时间。
-- Consumer 重试耗尽后 Nack 到配置的死信交换机，需要人工检查/重放。原有点赞与 Redis 热度的双发布仍不是原子操作；本次拆分不解决跨 MySQL/Redis 的全部一致性问题。
+- Consumer 重试耗尽后 Nack 到配置的死信交换机，需要人工检查/重放。互动热度通过事务 Outbox 在业务提交后更新 Redis；发布等待 Broker 确认并检查不可路由返回，结果不确定时保留原事件重试。
 - API 负责自动迁移表结构；Compose 首次启动等待 API 健康后再启动 Worker。通知新增可空唯一字段 `event_key`，已有通知记录可保留。正式多实例部署应把迁移作为单独步骤。
 
 API、Worker 默认各限制为 1 CPU、512 MiB，可通过 `API_CPUS`、`API_MEMORY`、`WORKER_CPUS`、`WORKER_MEMORY` 覆盖。Worker 可使用 `docker compose up -d --scale worker=2` 扩容。API 扩容还需调整固定宿主端口映射并配置负载均衡。
@@ -224,3 +224,25 @@ docker compose -p feedsystem-integration -f compose.integration.yml down -v
 - 上传文件写入 `backend/.run/uploads`；Docker 环境挂载到 `backend_uploads` volume。
 - Redis 用于 Token 缓存、视频实体缓存、Feed 时间线、热榜窗口、分片上传会话。
 - RabbitMQ Topic Exchange 覆盖点赞、评论、关注、热度、视频时间线事件，并配置 DLX。
+
+### 互动可靠性与缓存回填
+
+点赞、评论采用以下链路：
+
+```text
+API → MySQL Outbox（持久化业务命令）→ RabbitMQ → 业务消费者
+    → 事务：ConsumedEvent + 业务数据/计数 + 热度 Outbox
+    → RabbitMQ → 热度消费者 → Redis Lua：去重 + 失效缓存 + 更新分钟桶
+```
+
+- 接口成功表示命令已持久化接受，不表示异步消费完成。RabbitMQ 暂时不可用时，命令留在 Outbox，恢复后由 Worker 投递；不再使用可能与不确定投递重复执行的直接写库回退。
+- `consumed_events` 以消费者和 `event_id` 的哈希为唯一键，去重记录与业务写入同事务提交。记录不自动过期，删除记录会失去对应旧消息的重放保护。不同事件首次到达的乱序控制、客户端请求幂等键不在本协议内。
+- Redis 用一个 Lua 脚本原子处理事件去重、缓存版本变更、详情/实体缓存删除和热度累加。Redis 失败返回消费者，不再吞错 ACK。去重标记和分钟桶按事件发生时间设置相同的固定两小时保留截止时间，过期事件不会重建热度桶。
+- 两条视频缓存回填路径都在查询 MySQL 前读取 `video:generation:<id>`，回填时通过 Lua 比较版本。若期间发生失效，旧查询不能重新写入 Redis。版本键不设置 TTL；不要单独提前清理版本键或未到期的热度去重键。
+- 本地实体缓存仍保留最多 5 秒的 TTL；热榜仍是最近 60 个分钟桶、合并快照保留 2 分钟。删除评论不扣分的既有业务规则保持不变。
+
+迁移增加 `consumed_events` 表，并给 `outbox_msgs` 增加 `exchange`、`routing_key`、`payload` 列；API 的 AutoMigrate 已包含这些变更，独立 Worker 应在迁移完成后启动。原有视频发布 Outbox 仍可读取。
+
+升级已有运行环境时，先暂停互动写入并处理完旧版业务及热度队列，再停旧 Worker、完成迁移并启动新版 API/Worker。不能让旧 Worker 消费新增的通用 Outbox，也不能把旧版已独立发送的热度与新版业务派生热度混合重放。此修复不会自动纠正旧版本已经产生的重复评论或错误累计计数。
+
+新增回归测试覆盖：数据库中途失败和 Outbox 写入失败的事务回滚、点赞取消后的旧消息重放、评论去重及删除后重放、Redis 并发重复消费、Redis 错误传播、旧缓存回填拒绝、去重过期后的重放、并发发布确认和不可路由消息，以及 API 命令经 Outbox/MQ 到业务落库及 Redis 热度的完整链路。沿用上面的隔离集成测试命令；`TEST_MYSQL_DSN`、`TEST_AMQP_URL`、`TEST_REDIS_ADDR` 必须指向专用测试服务。

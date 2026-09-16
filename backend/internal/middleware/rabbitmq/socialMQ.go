@@ -9,7 +9,8 @@ import (
 )
 
 type SocialMQ struct {
-	ch *amqp.Channel
+	ch        *amqp.Channel
+	publisher *ConfirmedPublisher
 }
 
 const (
@@ -41,7 +42,12 @@ func NewSocialMQ(base *RabbitMQ) (*SocialMQ, error) {
 		ch.Close()
 		return nil, err
 	}
-	return &SocialMQ{ch: ch}, nil
+	publisher, err := NewConfirmedPublisher(ch)
+	if err != nil {
+		ch.Close()
+		return nil, err
+	}
+	return &SocialMQ{ch: ch, publisher: publisher}, nil
 }
 
 func (s *SocialMQ) Follow(ctx context.Context, followerID, vloggerID uint) error {
@@ -70,5 +76,5 @@ func (s *SocialMQ) publish(ctx context.Context, action, routingKey string, follo
 		VloggerID:  vloggerID,
 		OccurredAt: time.Now().UTC(),
 	}
-	return PublishJSON(ctx, s.ch, socialExchange, routingKey, evt)
+	return s.publisher.Publish(ctx, socialExchange, routingKey, true, evt)
 }

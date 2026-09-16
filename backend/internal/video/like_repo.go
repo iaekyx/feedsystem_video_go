@@ -3,6 +3,7 @@ package video
 import (
 	"context"
 	"errors"
+	"feedsystem_video_go/internal/middleware/rabbitmq"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -46,6 +47,41 @@ func (r *LikeRepository) ApplyLike(ctx context.Context, userID, videoID uint, li
 			"likes_count": gorm.Expr("GREATEST(likes_count + ?, 0)", delta),
 			"popularity":  gorm.Expr("GREATEST(popularity + ?, 0)", delta),
 		}).Error
+	})
+}
+
+func (r *LikeRepository) ApplyLikeEvent(ctx context.Context, evt rabbitmq.LikeEvent) error {
+	if evt.VideoID == 0 || evt.UserID == 0 || (evt.Action != "like" && evt.Action != "unlike") {
+		return errors.New("invalid like event")
+	}
+	return consumeEvent(r.db, ctx, "like", evt.EventID, func(tx *gorm.DB) error {
+		var v Video
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&v, evt.VideoID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		repo := NewLikeRepository(tx)
+		changed := false
+		var err error
+		delta := int64(1)
+		if evt.Action == "like" {
+			changed, err = repo.LikeIgnoreDuplicate(ctx, &Like{VideoID: evt.VideoID, AccountID: evt.UserID, CreatedAt: evt.OccurredAt})
+		} else {
+			delta = -1
+			changed, err = repo.DeleteByVideoAndAccount(ctx, evt.VideoID, evt.UserID)
+		}
+		if err != nil || !changed {
+			return err
+		}
+		if err := tx.Model(&Video{}).Where("id = ?", evt.VideoID).Updates(map[string]interface{}{
+			"likes_count": gorm.Expr("GREATEST(likes_count + ?, 0)", delta),
+			"popularity":  gorm.Expr("GREATEST(popularity + ?, 0)", delta),
+		}).Error; err != nil {
+			return err
+		}
+		return enqueuePopularity(tx, "like", evt.EventID, evt.VideoID, delta, evt.OccurredAt)
 	})
 }
 

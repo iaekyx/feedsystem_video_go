@@ -51,12 +51,30 @@ func RunOutboxPoller(ctx context.Context, db *gorm.DB, ch *amqp.Channel) error {
 	if err := DeclareFollowing(ch); err != nil {
 		return err
 	}
+	for _, topology := range []struct{ exchange, queue, binding string }{
+		{"like.events", "like.events", "like.*"},
+		{"comment.events", "comment.events", "comment.*"},
+		{"video.popularity.events", "video.popularity.events", "video.popularity.*"},
+	} {
+		if err := rabbitmq.DeclareTopic(ch, topology.exchange, topology.queue, topology.binding); err != nil {
+			return err
+		}
+	}
+	if err := DeclareNotificationQueues(ch); err != nil {
+		return err
+	}
 	publisher, err := newConfirmedPublisher(ch)
 	if err != nil {
 		return err
 	}
 	for ctx.Err() == nil {
 		found, err := dispatchOutbox(ctx, db, func(ctx context.Context, msg *video.OutboxMsg) error {
+			if msg.Exchange != "" {
+				if !json.Valid(msg.Payload) || msg.RoutingKey == "" {
+					return fmt.Errorf("invalid outbox event %d", msg.ID)
+				}
+				return publisher.Publish(ctx, msg.Exchange, msg.RoutingKey, true, json.RawMessage(msg.Payload))
+			}
 			event := rabbitmq.TimelineEvent{EventID: fmt.Sprintf("outbox:%d", msg.ID), VideoID: msg.VideoID, CreateTime: msg.CreateTime.UnixMilli(), OccurredAt: msg.CreateTime}
 			return publisher.Publish(ctx, timelineExchange, "video.timeline.publish", true, event)
 		})

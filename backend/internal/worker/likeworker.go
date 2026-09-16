@@ -95,19 +95,5 @@ func (w *LikeWorker) process(ctx context.Context, body []byte) error {
 		return nil
 	}
 
-	switch evt.Action {
-	case "like":
-		return w.applyLike(ctx, evt.UserID, evt.VideoID)
-	case "unlike":
-		return w.applyUnlike(ctx, evt.UserID, evt.VideoID)
-	default:
-		return nil
-	}
-}
-
-func (w *LikeWorker) applyLike(ctx context.Context, userID, videoID uint) error {
-	return w.likes.ApplyLike(ctx, userID, videoID, true)
-}
-func (w *LikeWorker) applyUnlike(ctx context.Context, userID, videoID uint) error {
-	return w.likes.ApplyLike(ctx, userID, videoID, false)
+	return w.likes.ApplyLikeEvent(ctx, evt)
 }

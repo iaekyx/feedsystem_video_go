@@ -30,7 +30,7 @@ func testDB(t *testing.T) *gorm.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { sql.Close() })
-	if err := db.AutoMigrate(&video.Video{}, &video.Like{}, &video.OutboxMsg{}, &Notification{}); err != nil {
+	if err := db.AutoMigrate(&video.Video{}, &video.Like{}, &video.Comment{}, &video.OutboxMsg{}, &video.ConsumedEvent{}, &Notification{}); err != nil {
 		t.Fatal(err)
 	}
 	return db

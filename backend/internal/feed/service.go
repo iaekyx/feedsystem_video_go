@@ -114,6 +114,9 @@ func (f *FeedService) GetVideoByIDs(ctx context.Context, videoIDs []uint) ([]*vi
 			sfKey := f.rediscache.Key("sf:entity:%d", videoID)
 
 			v, err, _ := f.requestGroup.Do(sfKey, func() (interface{}, error) {
+				versionCtx, versionCancel := context.WithTimeout(ctx, 50*time.Millisecond)
+				generation, versionErr := f.rediscache.VideoGeneration(versionCtx, videoID)
+				versionCancel()
 				videoList, err := f.repo.GetByIDs(ctx, []uint{videoID})
 
 				if err != nil || len(videoList) == 0 {
@@ -122,13 +125,13 @@ func (f *FeedService) GetVideoByIDs(ctx context.Context, videoIDs []uint) ([]*vi
 
 				safeCopy := *videoList[0]
 				cachekey := f.rediscache.Key("video:entity:%d", safeCopy.ID)
-				if b, err := json.Marshal(safeCopy); err == nil {
+				if b, err := json.Marshal(safeCopy); err == nil && versionErr == nil {
 					//异步回写redis
 					go func(k string, b []byte) {
 						setCtx, setCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 						defer setCancel()
 
-						f.rediscache.SetBytes(setCtx, k, b, time.Hour)
+						_, _ = f.rediscache.SetVideoBytes(setCtx, videoID, k, generation, b, time.Hour)
 					}(cachekey, b)
 				}
 				return videoList[0], err

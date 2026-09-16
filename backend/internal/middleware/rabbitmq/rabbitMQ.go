@@ -1,15 +1,12 @@
 package rabbitmq
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"feedsystem_video_go/internal/config"
 	"log"
 	"strconv"
-	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -95,24 +92,7 @@ func DeclareTopic(ch *amqp.Channel, exchange string, queue string, bindingKey st
 	return nil
 }
 
-func PublishJSON(ctx context.Context, ch *amqp.Channel, exchange string, routingKey string, payload any) error {
-	if ch == nil {
-		return errors.New("channel is not initialized")
-	}
-	if exchange == "" || routingKey == "" {
-		return errors.New("exchange and routingKey are required")
-	}
-	b, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	return ch.PublishWithContext(ctx, exchange, routingKey, false, false, amqp.Publishing{
-		ContentType:  "application/json",
-		DeliveryMode: amqp.Persistent,
-		Timestamp:    time.Now(),
-		Body:         b,
-	})
-}
+func NewEventID() (string, error) { return newEventID(16) }
 
 func newEventID(n int) (string, error) {
 	b := make([]byte, n)

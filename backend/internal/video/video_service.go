@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strconv"
 	"strings"
 	"time"
 
@@ -108,89 +107,69 @@ func (vs *VideoService) ListByAuthorID(ctx context.Context, authorID uint) ([]Vi
 
 func (vs *VideoService) GetDetail(ctx context.Context, id uint) (*Video, error) {
 	cacheKey := vs.cache.Key("video:detail:id=%d", id)
-
 	getCached := func() (*Video, bool) {
 		opCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
 		defer cancel()
-
 		b, err := vs.cache.GetBytes(opCtx, cacheKey)
 		if err != nil {
 			return nil, false
 		}
 		var cached Video
-		if err := json.Unmarshal(b, &cached); err != nil {
+		if json.Unmarshal(b, &cached) != nil {
 			return nil, false
 		}
 		return &cached, true
 	}
-
-	setCached := func(video *Video) {
-		b, err := json.Marshal(video)
+	load := func() (*Video, error) {
+		versionCtx, versionCancel := context.WithTimeout(ctx, 50*time.Millisecond)
+		generation, versionErr := vs.cache.VideoGeneration(versionCtx, id)
+		versionCancel()
+		v, err := vs.repo.GetByID(ctx, id)
 		if err != nil {
-			return
+			return nil, err
 		}
-		opCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-		defer cancel()
-		_ = vs.cache.SetBytes(opCtx, cacheKey, b, vs.cacheTTL)
+		if versionErr == nil {
+			if b, err := json.Marshal(v); err == nil {
+				setCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+				defer cancel()
+				_, _ = vs.cache.SetVideoBytes(setCtx, id, cacheKey, generation, b, vs.cacheTTL)
+			}
+		}
+		return v, nil
 	}
-
-	if vs.cache != nil {
+	if vs.cache == nil {
+		return vs.repo.GetByID(ctx, id)
+	}
+	if v, ok := getCached(); ok {
+		return v, nil
+	}
+	lockCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	token, locked, err := vs.cache.Lock(lockCtx, "lock:"+cacheKey, 2*time.Second)
+	cancel()
+	if err == nil && locked {
+		defer func() {
+			unlockCtx, unlockCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer unlockCancel()
+			_ = vs.cache.Unlock(unlockCtx, "lock:"+cacheKey, token)
+		}()
 		if v, ok := getCached(); ok {
 			return v, nil
 		}
-
-		opCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-		b, err := vs.cache.GetBytes(opCtx, cacheKey)
-		cancel()
-		if err == nil {
-			var cached Video
-			if err := json.Unmarshal(b, &cached); err == nil {
-				return &cached, nil
+		return load()
+	}
+	if err == nil {
+		for i := 0; i < 5; i++ {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(20 * time.Millisecond):
 			}
-		} else if rediscache.IsMiss(err) {
-			lockKey := "lock:" + cacheKey
-
-			lockCtx, lockCancel := context.WithTimeout(ctx, 50*time.Millisecond)
-			token, locked, lockErr := vs.cache.Lock(lockCtx, lockKey, 2*time.Second)
-			lockCancel()
-
-			if lockErr == nil && locked {
-				defer func() { _ = vs.cache.Unlock(context.Background(), lockKey, token) }()
-
-				if v, ok := getCached(); ok {
-					return v, nil
-				}
-
-				video, err := vs.repo.GetByID(ctx, id)
-				if err != nil {
-					return nil, err
-				}
-				setCached(video)
-				return video, nil
-			}
-
-			// 没拿到锁：等待别人回填缓存
-			for i := 0; i < 5; i++ {
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(20 * time.Millisecond):
-				}
-				if v, ok := getCached(); ok {
-					return v, nil
-				}
+			if v, ok := getCached(); ok {
+				return v, nil
 			}
 		}
 	}
-
-	video, err := vs.repo.GetByID(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if vs.cache != nil {
-		setCached(video)
-	}
-	return video, nil
+	return load()
 }
 
 func (vs *VideoService) UpdateLikesCount(ctx context.Context, id uint, likesCount int64) error {
@@ -201,30 +180,22 @@ func (vs *VideoService) UpdateLikesCount(ctx context.Context, id uint, likesCoun
 }
 
 func (vs *VideoService) UpdatePopularity(ctx context.Context, id uint, change int64) error {
-	if err := vs.repo.UpdatePopularity(ctx, id, change); err != nil {
+	eventID, err := rabbitmq.NewEventID()
+	if err != nil {
 		return err
 	}
-
-	if vs.popularityMQ != nil {
-		if err := vs.popularityMQ.Update(ctx, id, change); err == nil {
+	return vs.repo.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&Video{}).Where("id = ?", id).
+			UpdateColumn("popularity", gorm.Expr("popularity + ?", change))
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return errors.New("video not found")
+		}
+		if change == 0 {
 			return nil
 		}
-	}
-
-	if vs.cache != nil {
-		// 1) 详情缓存：直接失效（最简单靠谱）
-		_ = vs.cache.Del(context.Background(), vs.cache.Key("video:detail:id=%d", id))
-
-		// 2) 热榜：写到“时间窗ZSET”，不要用 detail key
-		now := time.Now().UTC().Truncate(time.Minute)
-		windowKey := vs.cache.Key("hot:video:1m:%s", now.Format("200601021504"))
-		member := strconv.FormatUint(uint64(id), 10)
-
-		opCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-		defer cancel()
-
-		_ = vs.cache.ZincrBy(opCtx, windowKey, member, float64(change))
-		_ = vs.cache.Expire(opCtx, windowKey, 2*time.Hour)
-	}
-	return nil
+		return enqueuePopularity(tx, "video", eventID, id, change, time.Now().UTC())
+	})
 }

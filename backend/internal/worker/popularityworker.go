@@ -93,6 +93,5 @@ func (w *PopularityWorker) process(ctx context.Context, body []byte) error {
 	if evt.VideoID == 0 || evt.Change == 0 {
 		return nil
 	}
-	video.UpdatePopularityCache(ctx, w.cache, evt.VideoID, evt.Change)
-	return nil
+	return video.UpdatePopularityCache(ctx, w.cache, evt)
 }
